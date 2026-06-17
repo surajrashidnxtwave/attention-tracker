@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Attention Test Harness — modern IntelliEye-style</title>
+<style>
+  :root { --bg:#0f1115; --panel:#181b22; --line:#2a2f3a; --txt:#e6e9ef; --mut:#9aa3b2; --ok:#36d399; --bad:#f87272; --warn:#fbbd23; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 system-ui,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--txt); }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  header .sub { color:var(--mut); font-size:12px; }
+  main { display:grid; grid-template-columns:1.4fr 1fr; gap:16px; padding:16px 20px; align-items:start; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--mut); margin:0 0 10px; }
+  /* video + alert border */
+  .videoWrap { position:relative; border-radius:8px; overflow:hidden; background:#000; }
+  video#lecture { width:100%; display:block; }
+  .alertBorder { position:absolute; inset:0; border:0 solid var(--bad); border-radius:8px; pointer-events:none; transition:border-width .15s; }
+  .alertBorder.on { animation:flash .8s infinite; }
+  @keyframes flash { 0%,100%{border-width:0} 50%{border-width:10px} }
+  /* webcam */
+  .camWrap { position:relative; width:100%; aspect-ratio:4/3; background:#000; border-radius:8px; overflow:hidden; }
+  video#cam { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; transform:scaleX(-1); }
+  canvas#overlay { position:absolute; inset:0; width:100%; height:100%; transform:scaleX(-1); }
+  /* status */
+  .state { font-size:20px; font-weight:700; padding:8px 12px; border-radius:8px; display:inline-block; }
+  .state.att { background:rgba(54,211,153,.15); color:var(--ok); }
+  .state.inatt { background:rgba(248,114,114,.15); color:var(--bad); }
+  .state.wait { background:rgba(154,163,178,.15); color:var(--mut); }
+  .metrics { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:12px; }
+  .metric { background:#11141a; border:1px solid var(--line); border-radius:8px; padding:10px; }
+  .metric .k { color:var(--mut); font-size:11px; text-transform:uppercase; }
+  .metric .v { font-size:22px; font-weight:700; margin-top:2px; }
+  .reasons { font-size:12px; color:var(--mut); min-height:18px; margin-top:6px; }
+  .reasons b { color:var(--warn); }
+  /* controls */
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:8px 0; }
+  button { background:#2563eb; color:#fff; border:0; padding:8px 14px; border-radius:8px; cursor:pointer; font-size:13px; }
+  button.sec { background:#2a2f3a; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  input[type=file] { color:var(--mut); font-size:12px; }
+  label.slider { display:flex; flex-direction:column; gap:2px; font-size:11px; color:var(--mut); }
+  label.slider input { width:160px; }
+  .sparkWrap { margin-top:12px; }
+  canvas#spark { width:100%; height:46px; background:#11141a; border:1px solid var(--line); border-radius:8px; }
+  .log { margin-top:10px; max-height:160px; overflow:auto; font-family:ui-monospace,Consolas,monospace; font-size:11px; background:#0b0d11; border:1px solid var(--line); border-radius:8px; padding:8px; }
+  .log div { white-space:pre; }
+  .log .i { color:var(--bad); }
+  .log .a { color:var(--ok); }
+  .toggle { display:flex; gap:6px; align-items:center; font-size:12px; color:var(--mut); }
+  footer { padding:10px 20px; color:var(--mut); font-size:11px; border-top:1px solid var(--line); }
+  /* screen-map */
+  canvas#screenMap { width:100%; height:120px; background:#11141a; border:1px solid var(--line); border-radius:8px; margin-top:6px; }
+  /* 9-point calibration overlay */
+  #calibOverlay { position:fixed; inset:0; background:#0b0d11; z-index:9999; display:none; }
+  #calibOverlay.on { display:block; }
+  #calibDot { position:absolute; width:26px; height:26px; margin:-13px 0 0 -13px; border-radius:50%;
+    background:radial-gradient(circle,#fbbd23 0 30%,rgba(251,189,35,.25) 60%,transparent 70%);
+    transition:left .35s ease, top .35s ease; }
+  #calibDot::after { content:''; position:absolute; inset:10px; border-radius:50%; background:#fff; }
+  #calibInfo { position:absolute; top:16px; left:0; right:0; text-align:center; color:var(--mut); font-size:13px; }
+  @media(max-width:900px){ main{grid-template-columns:1fr} }
+</style>
+</head>
+<body>
+<header>
+  <h1>Attention Test Harness</h1>
+  <span class="sub">MediaPipe FaceLandmarker · webcam → scoring window → visual/pause alert + CSV log. Modern stand-in for IntelliEye's dead remote core.</span>
+</header>
+
+<main>
+  <!-- LEFT: lecture video -->
+  <section class="panel">
+    <h2>Sample lecture video</h2>
+    <div class="row">
+      <input type="file" id="videoFile" accept="video/*">
+      <button class="sec" id="loadSample">Use demo clip (Big Buck Bunny)</button>
+    </div>
+    <div class="videoWrap">
+      <video id="lecture" controls playsinline></video>
+      <div class="alertBorder" id="alertBorder"></div>
+    </div>
+    <div class="row">
+      <label class="toggle"><input type="checkbox" id="actVisual" checked> Visual alert (flash border)</label>
+      <label class="toggle"><input type="checkbox" id="actPause"> Pause on inattention (IntelliEye-style)</label>
+    </div>
+  </section>
+
+  <!-- RIGHT: detection + metrics -->
+  <section class="panel">
+    <h2>Webcam &amp; attention</h2>
+    <div class="camWrap">
+      <video id="cam" autoplay muted playsinline></video>
+      <canvas id="overlay"></canvas>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button id="startBtn">Start tracking</button>
+      <button class="sec" id="calibBtn" disabled>Calibrate gaze (9-point)</button>
+      <button class="sec" id="stopBtn" disabled>Stop</button>
+      <span class="state wait" id="stateBadge">Idle</span>
+    </div>
+    <div class="reasons" id="reasons"></div>
+    <div class="reasons" id="gazeReadout">gaze: <b>not calibrated</b> — run 9-point calibration to enable real eye tracking</div>
+    <canvas id="screenMap" width="300" height="120" title="green box = screen; dot = where you're looking"></canvas>
+
+    <div class="metrics">
+      <div class="metric"><div class="k">% Attentive (session)</div><div class="v" id="mPct">—</div></div>
+      <div class="metric"><div class="k">Watch time</div><div class="v" id="mTime">0:00</div></div>
+      <div class="metric"><div class="k">Inattention events</div><div class="v" id="mEvents">0</div></div>
+      <div class="metric"><div class="k">FPS (detector)</div><div class="v" id="mFps">—</div></div>
+    </div>
+
+    <div class="sparkWrap">
+      <h2 style="margin-bottom:6px">Attention timeline</h2>
+      <canvas id="spark" width="600" height="46"></canvas>
+    </div>
+
+    <h2 style="margin-top:14px">Thresholds</h2>
+    <div class="row">
+      <label class="slider">Screen margin <input type="range" id="thMargin" min="0" max="0.35" step="0.01" value="0.12"></label>
+      <label class="slider">Gaze smoothing α <input type="range" id="thAlpha" min="0" max="0.9" step="0.05" value="0.6"></label>
+      <label class="slider">Head turn tolerance <input type="range" id="thYaw" min="0.05" max="0.35" step="0.01" value="0.16"></label>
+      <label class="slider">Head tilt tolerance <input type="range" id="thPitch" min="0.05" max="0.40" step="0.01" value="0.22"></label>
+      <label class="slider">Window size (frames) <input type="range" id="thWin" min="5" max="60" step="1" value="20"></label>
+      <label class="slider">Attentive ratio <input type="range" id="thRatio" min="0.3" max="0.95" step="0.05" value="0.6"></label>
+    </div>
+
+    <div class="row">
+      <button class="sec" id="exportBtn" disabled>Export CSV log</button>
+    </div>
+    <div class="log" id="log"></div>
+  </section>
+</main>
+
+<footer>
+  Privacy: webcam frames are processed in-browser only; nothing is uploaded. Mirrors IntelliEye's privacy-aware design. Reference: Robal/Zhao/Lofi/Hauff, "IntelliEye", Hypertext 2018.
+</footer>
+
+<!-- 9-point gaze calibration overlay -->
+<div id="calibOverlay">
+  <div id="calibInfo">Follow the dot with your eyes — keep your head still.</div>
+  <div id="calibDot"></div>
+</div>
+
+<script type="module">
+import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+// ---- elements ----
+const $ = id => document.getElementById(id);
+const cam = $('cam'), overlay = $('overlay'), octx = overlay.getContext('2d');
+const lecture = $('lecture'), alertBorder = $('alertBorder');
+const stateBadge = $('stateBadge'), reasonsEl = $('reasons');
+const logEl = $('log'), spark = $('spark'), sctx = spark.getContext('2d');
+const screenMap = $('screenMap'), mctx = screenMap.getContext('2d');
+const calibOverlay = $('calibOverlay'), calibDot = $('calibDot'), calibInfo = $('calibInfo');
+
+let landmarker = null, running = false, rafId = null;
+let lastVideoTime = -1, lastTs = performance.now(), fps = 0;
+
+// ---- scoring state (mirrors IntelliEye tracking array + scoring module) ----
+let frameWindow = [];                 // recent per-frame attentive booleans
+let session = { frames:0, attentive:0, events:0, startedAt:0, watchMs:0 };
+let curState = 'wait';                 // 'att' | 'inatt' | 'wait'
+let sparkHist = [];                    // 0/1 history for timeline
+let csvRows = [['t_iso','attentive','reasons','headYaw','headPitch','gazeScreenX','gazeScreenY','eyesClosed','tabHidden']];
+let tabHidden = false;
+
+// ---- iris-gaze regression model ----
+// 9-point calibration learns a linear map from [iris ratios + head pose] -> screen coords.
+// Head pose is a regression input, so head movement is compensated automatically.
+let gazeModel = { bx:null, by:null, set:false }; // coefficient vectors
+let gazeEMA = { x:0.5, y:0.5 };                  // smoothed predicted screen point
+let collecting = false, collectBuf = [];         // active sample collection during calibration
+
+document.addEventListener('visibilitychange', () => { tabHidden = document.hidden; });
+
+// ---- thresholds ----
+const cfg = () => ({
+  margin: +$('thMargin').value, alpha: +$('thAlpha').value, yaw: +$('thYaw').value,
+  pitch: +$('thPitch').value, win: +$('thWin').value, ratio: +$('thRatio').value,
+});
+
+// ---- feature vector for gaze regression ----
+// quadratic in iris ratios (eye nonlinearity) + linear head pose (compensation).
+function gazeFeatures(irisH, irisV, yaw, pitch) {
+  return [1, irisH, irisV, irisH*irisH, irisV*irisV, irisH*irisV, yaw, pitch];
+}
+function predict(beta, f) { let s = 0; for (let i=0;i<f.length;i++) s += beta[i]*f[i]; return s; }
+
+// ---- least squares: solve (XtX) b = Xty for each target via Gaussian elimination ----
+function solveLinear(A, b) {
+  const n = A.length;
+  const M = A.map((row, i) => row.concat(b[i])); // augmented
+  for (let col=0; col<n; col++) {
+    let piv = col;
+    for (let r=col+1; r<n; r++) if (Math.abs(M[r][col]) > Math.abs(M[piv][col])) piv = r;
+    [M[col], M[piv]] = [M[piv], M[col]];
+    const d = M[col][col] || 1e-9;
+    for (let r=0; r<n; r++) {
+      if (r===col) continue;
+      const factor = M[r][col] / d;
+      for (let k=col; k<=n; k++) M[r][k] -= factor * M[col][k];
+    }
+  }
+  return M.map((row, i) => row[n] / (row[i] || 1e-9));
+}
+// fit beta for samples [{f:[], t:number}] (ridge-regularized normal equations)
+function fitAxis(samples, target) {
+  const dim = samples[0].f.length, lambda = 1e-4;
+  const XtX = Array.from({length:dim}, () => new Array(dim).fill(0));
+  const Xty = new Array(dim).fill(0);
+  for (const s of samples) {
+    for (let i=0;i<dim;i++) {
+      Xty[i] += s.f[i] * s[target];
+      for (let j=0;j<dim;j++) XtX[i][j] += s.f[i]*s.f[j];
+    }
+  }
+  for (let i=0;i<dim;i++) XtX[i][i] += lambda; // regularize
+  return solveLinear(XtX, Xty);
+}
+
+// ---- load detector ----
+async function initLandmarker() {
+  const files = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+  landmarker = await FaceLandmarker.createFromOptions(files, {
+    baseOptions: {
+      modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+      delegate: "GPU",
+    },
+    runningMode: "VIDEO",
+    numFaces: 1,
+    outputFaceBlendshapes: true,
+  });
+}
+
+// ---- webcam ----
+async function startCam() {
+  const stream = await navigator.mediaDevices.getUserMedia({ video: { width:640, height:480 } });
+  cam.srcObject = stream;
+  await new Promise(r => cam.onloadedmetadata = r);
+  overlay.width = cam.videoWidth; overlay.height = cam.videoHeight;
+}
+
+// ---- per-frame attention decision ----
+// Head pose proxies from normalized landmarks (no matrix-convention guessing):
+//   yaw  = nose horizontal position between cheeks (0.5 = centered)
+//   pitch = nose vertical position between brow & chin (~0.5 centered)
+// Eye closure from blendshapes (eyeBlink > 0.5).
+// iris landmark indices (MediaPipe 478-point model, refined iris):
+//   left iris center 468, right iris center 473
+// eye corners: L outer 33 / inner 133 ; R inner 362 / outer 263
+// eyelids (vertical): L top 159 / bot 145 ; R top 386 / bot 374
+function irisGaze(lm) {
+  const ratio = (p, a, b) => (p - a) / ((b - a) || 1e-3); // 0..1 along axis
+  // horizontal: iris between inner/outer corner
+  const lH = ratio(lm[468].x, lm[33].x, lm[133].x);
+  const rH = ratio(lm[473].x, lm[362].x, lm[263].x);
+  // vertical: iris between top/bottom lid
+  const lV = ratio(lm[468].y, lm[159].y, lm[145].y);
+  const rV = ratio(lm[473].y, lm[386].y, lm[374].y);
+  return { x:(lH + rH) / 2, y:(lV + rV) / 2 };
+}
+
+function decide(res) {
+  const reasons = [];
+  if (!res.faceLandmarks || res.faceLandmarks.length === 0) {
+    return { ok:false, reasons:['no face'], yaw:null, pitch:null, gaze:null, eyes:false };
+  }
+  const lm = res.faceLandmarks[0];
+  const nose = lm[1], cheekL = lm[234], cheekR = lm[454], brow = lm[10], chin = lm[152];
+  const c = cfg();
+
+  // head pose proxies
+  const yaw = (nose.x - (cheekL.x + cheekR.x) / 2) / Math.abs(cheekR.x - cheekL.x || 1e-3);
+  const pitch = ((nose.y - brow.y) / Math.abs(chin.y - brow.y || 1e-3)) - 0.5;
+  if (Math.abs(yaw) > c.yaw) reasons.push('head turned');
+  if (Math.abs(pitch) > c.pitch) reasons.push(pitch > 0 ? 'looking down' : 'looking up');
+
+  // eyes closed via blendshapes (iris unreliable when closed)
+  let eyesClosed = false;
+  if (res.faceBlendshapes && res.faceBlendshapes[0]) {
+    const bs = {};
+    res.faceBlendshapes[0].categories.forEach(x => bs[x.categoryName] = x.score);
+    eyesClosed = (bs.eyeBlinkLeft > 0.5 && bs.eyeBlinkRight > 0.5);
+    if (eyesClosed) reasons.push('eyes closed');
+  }
+
+  // iris gaze -> predicted screen point via calibrated regression
+  const iris = irisGaze(lm);
+  const f = gazeFeatures(iris.x, iris.y, yaw, pitch);
+  if (collecting && !eyesClosed) collectBuf.push(f);
+
+  let gaze = null;
+  if (gazeModel.set && !eyesClosed) {
+    const px = predict(gazeModel.bx, f), py = predict(gazeModel.by, f);
+    // EMA smoothing
+    const a = c.alpha;
+    gazeEMA.x = a*gazeEMA.x + (1-a)*px;
+    gazeEMA.y = a*gazeEMA.y + (1-a)*py;
+    gaze = { x: gazeEMA.x, y: gazeEMA.y };
+    const m = c.margin;
+    const inX = gaze.x >= -m && gaze.x <= 1+m;
+    const inY = gaze.y >= -m && gaze.y <= 1+m;
+    if (!inX) reasons.push(gaze.x > 1 ? 'gaze off right' : 'gaze off left');
+    if (!inY) reasons.push(gaze.y > 1 ? 'gaze off bottom' : 'gaze off top');
+  } else if (!gazeModel.set) {
+    reasons.push('gaze uncalibrated');
+  }
+
+  if (tabHidden) reasons.push('tab hidden');
+
+  // 'gaze uncalibrated' is a caveat, not a hard inattention signal on its own
+  const hard = reasons.filter(r => r !== 'gaze uncalibrated');
+  const ok = hard.length === 0;
+  return { ok, reasons, yaw, pitch, gaze, eyes: eyesClosed };
+}
+
+// ---- main loop ----
+function loop() {
+  if (!running) return;
+  const now = performance.now();
+  if (cam.currentTime !== lastVideoTime) {
+    lastVideoTime = cam.currentTime;
+    const res = landmarker.detectForVideo(cam, now);
+    const d = decide(res);
+    drawOverlay(res);
+    applyScoring(d);
+  }
+  // fps
+  fps = 0.9 * fps + 0.1 * (1000 / (now - lastTs)); lastTs = now;
+  $('mFps').textContent = fps.toFixed(0);
+  rafId = requestAnimationFrame(loop);
+}
+
+function applyScoring(d) {
+  const c = cfg();
+  session.frames++;
+  if (d.ok) session.attentive++;
+
+  frameWindow.push(d.ok ? 1 : 0);
+  while (frameWindow.length > c.win) frameWindow.shift();
+  const wRatio = frameWindow.reduce((a,b)=>a+b,0) / frameWindow.length;
+  const attentive = wRatio >= c.ratio;
+
+  // state transition + event count
+  const newState = attentive ? 'att' : 'inatt';
+  if (newState !== curState) {
+    if (newState === 'inatt') {
+      session.events++;
+      log(`inattention — ${d.reasons.join(', ') || 'low window ratio'}`, 'i');
+    } else {
+      log('attention regained', 'a');
+    }
+    curState = newState;
+    onStateChange(attentive);
+  }
+
+  // metrics
+  $('stateBadge').className = 'state ' + (attentive ? 'att' : 'inatt');
+  $('stateBadge').textContent = attentive ? 'ATTENTIVE' : 'INATTENTIVE';
+  reasonsEl.innerHTML = d.reasons.length ? 'flags: <b>' + d.reasons.join('</b>, <b>') + '</b>' : 'clear';
+  $('mPct').textContent = ((session.attentive / session.frames) * 100).toFixed(0) + '%';
+  $('mEvents').textContent = session.events;
+  if (!lecture.paused) session.watchMs += 0; // watch time tracked via video timeupdate below
+  updateWatchTime();
+
+  // timeline
+  sparkHist.push(attentive ? 1 : 0);
+  if (sparkHist.length > spark.width) sparkHist.shift();
+  drawSpark();
+
+  // gaze readout + screen map
+  if (gazeModel.set && d.gaze) {
+    $('gazeReadout').innerHTML = `gaze on screen  x:<b>${d.gaze.x.toFixed(2)}</b>  y:<b>${d.gaze.y.toFixed(2)}</b>  (0..1 = inside screen)`;
+  } else if (!gazeModel.set) {
+    $('gazeReadout').innerHTML = 'gaze: <b>not calibrated</b> — run 9-point calibration to enable real eye tracking';
+  }
+  drawScreenMap(d.gaze);
+
+  // csv
+  csvRows.push([new Date().toISOString(), attentive, d.reasons.join('|'),
+    d.yaw==null?'':d.yaw.toFixed(3), d.pitch==null?'':d.pitch.toFixed(3),
+    d.gaze?d.gaze.x.toFixed(3):'', d.gaze?d.gaze.y.toFixed(3):'', d.eyes, tabHidden]);
+}
+
+// ---- reactions (visual / pause), mirrors IntelliEye alert module ----
+let pausedByWidget = false;
+function onStateChange(attentive) {
+  if ($('actVisual').checked) alertBorder.classList.toggle('on', !attentive);
+  else alertBorder.classList.remove('on');
+
+  if ($('actPause').checked) {
+    if (!attentive && !lecture.paused) { lecture.pause(); pausedByWidget = true; }
+    else if (attentive && pausedByWidget) {
+      // rewind a little (IntelliEye: short recall on regain)
+      lecture.currentTime = Math.max(0, lecture.currentTime - 3);
+      lecture.play(); pausedByWidget = false;
+    }
+  }
+}
+
+// ---- watch time ----
+let lastTick = 0;
+lecture.addEventListener('timeupdate', () => {
+  const t = performance.now();
+  if (lastTick && !lecture.paused) session.watchMs += (t - lastTick);
+  lastTick = t;
+});
+function updateWatchTime() {
+  const s = Math.floor(session.watchMs / 1000);
+  $('mTime').textContent = `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
+}
+
+// ---- draw ----
+function drawOverlay(res) {
+  octx.clearRect(0,0,overlay.width,overlay.height);
+  if (!res.faceLandmarks || !res.faceLandmarks[0]) return;
+  const lm = res.faceLandmarks[0];
+  const W = overlay.width, H = overlay.height;
+  // mesh points
+  octx.fillStyle = curState === 'inatt' ? 'rgba(248,114,114,.6)' : 'rgba(54,211,153,.5)';
+  for (const p of lm) { octx.beginPath(); octx.arc(p.x*W, p.y*H, 1, 0, 7); octx.fill(); }
+  // iris centers (highlight)
+  octx.fillStyle = '#fbbd23';
+  for (const i of [468, 473]) {
+    octx.beginPath(); octx.arc(lm[i].x*W, lm[i].y*H, 3.5, 0, 7); octx.fill();
+  }
+}
+
+// screen map: unit rect = screen, dot = predicted gaze point (green inside, red outside)
+function drawScreenMap(gaze) {
+  const W = screenMap.width, H = screenMap.height, pad = 14;
+  mctx.clearRect(0,0,W,H);
+  const x0=pad, y0=pad, w=W-2*pad, h=H-2*pad;
+  mctx.strokeStyle='#36d399'; mctx.lineWidth=1.5; mctx.strokeRect(x0,y0,w,h);
+  mctx.fillStyle='#475063'; mctx.font='10px system-ui';
+  mctx.fillText('screen', x0+4, y0+12);
+  if (gazeModel.set && gaze) {
+    const inside = gaze.x>=0 && gaze.x<=1 && gaze.y>=0 && gaze.y<=1;
+    const px = x0 + gaze.x*w, py = y0 + gaze.y*h;
+    mctx.fillStyle = inside ? '#36d399' : '#f87272';
+    mctx.beginPath(); mctx.arc(Math.max(2,Math.min(W-2,px)), Math.max(2,Math.min(H-2,py)), 6, 0, 7); mctx.fill();
+  }
+}
+function drawSpark() {
+  sctx.clearRect(0,0,spark.width,spark.height);
+  for (let i=0;i<sparkHist.length;i++){
+    sctx.fillStyle = sparkHist[i] ? '#36d399' : '#f87272';
+    sctx.fillRect(i, 0, 1, spark.height);
+  }
+}
+
+// ---- log ----
+function log(msg, cls='') {
+  const d = document.createElement('div');
+  d.className = cls;
+  d.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  logEl.prepend(d);
+}
+
+// ---- controls ----
+$('startBtn').onclick = async () => {
+  $('startBtn').disabled = true;
+  stateBadge.className = 'state wait'; stateBadge.textContent = 'Loading model…';
+  try {
+    if (!landmarker) await initLandmarker();
+    await startCam();
+    running = true;
+    session = { frames:0, attentive:0, events:0, startedAt:Date.now(), watchMs:0 };
+    frameWindow = []; sparkHist = []; csvRows = [csvRows[0]]; curState = 'wait';
+    gazeModel.set = false; gazeEMA = { x:0.5, y:0.5 };
+    $('stopBtn').disabled = false; $('exportBtn').disabled = false; $('calibBtn').disabled = false;
+    log('tracking started — run 9-point calibration to enable real eye tracking');
+    loop();
+  } catch (e) {
+    stateBadge.className='state inatt'; stateBadge.textContent='Error';
+    log('error: ' + e.message, 'i');
+    $('startBtn').disabled = false;
+  }
+};
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+// 3x3 grid of screen targets (slight inset so edges are reachable/visible)
+const CALIB_PTS = [];
+for (const sy of [0.08, 0.5, 0.92]) for (const sx of [0.08, 0.5, 0.92]) CALIB_PTS.push({sx, sy});
+
+async function runCalibration() {
+  if (!running) return;
+  $('calibBtn').disabled = true; $('startBtn').disabled = true; $('stopBtn').disabled = true;
+  gazeModel.set = false;
+  calibOverlay.classList.add('on');
+  const samples = [];
+  await sleep(600);
+  for (let i=0;i<CALIB_PTS.length;i++) {
+    const p = CALIB_PTS[i];
+    calibInfo.textContent = `Look at the dot (${i+1}/${CALIB_PTS.length}) — keep your head still.`;
+    calibDot.style.left = (p.sx*100)+'vw';
+    calibDot.style.top  = (p.sy*100)+'vh';
+    await sleep(650);                 // travel + settle
+    collectBuf = []; collecting = true;
+    await sleep(750);                 // collect (~loop frames push features)
+    collecting = false;
+    if (collectBuf.length >= 3) {
+      const dim = collectBuf[0].length;
+      const mean = new Array(dim).fill(0);
+      collectBuf.forEach(f => f.forEach((v,k)=>mean[k]+=v));
+      mean.forEach((v,k)=>mean[k]=v/collectBuf.length);
+      samples.push({ f: mean, sx: p.sx, sy: p.sy });
+    }
+  }
+  calibOverlay.classList.remove('on');
+  $('calibBtn').disabled = false; $('startBtn').disabled = true; $('stopBtn').disabled = false;
+
+  if (samples.length < 6) {
+    log('calibration failed — not enough samples (face not detected?)', 'i');
+    return;
+  }
+  gazeModel.bx = fitAxis(samples, 'sx');
+  gazeModel.by = fitAxis(samples, 'sy');
+  gazeModel.set = true;
+  gazeEMA = { x:0.5, y:0.5 };
+
+  // residual (RMS in % of screen)
+  let se = 0;
+  for (const s of samples) {
+    const ex = predict(gazeModel.bx, s.f) - s.sx;
+    const ey = predict(gazeModel.by, s.f) - s.sy;
+    se += ex*ex + ey*ey;
+  }
+  const rms = Math.sqrt(se / (samples.length*2)) * 100;
+  log(`gaze calibrated — ${samples.length}/9 points, residual ${rms.toFixed(1)}% of screen`, 'a');
+  if (rms > 18) log('high residual — recalibrate, hold head still & ensure good lighting', 'i');
+}
+$('calibBtn').onclick = runCalibration;
+$('stopBtn').onclick = () => {
+  running = false; cancelAnimationFrame(rafId);
+  (cam.srcObject?.getTracks()||[]).forEach(t=>t.stop());
+  alertBorder.classList.remove('on');
+  $('startBtn').disabled=false; $('stopBtn').disabled=true; $('calibBtn').disabled=true;
+  stateBadge.className='state wait'; stateBadge.textContent='Stopped';
+  log('tracking stopped');
+};
+$('exportBtn').onclick = () => {
+  const csv = csvRows.map(r=>r.join(',')).join('\n');
+  const url = URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
+  const a=document.createElement('a'); a.href=url; a.download='attention-log.csv'; a.click();
+  URL.revokeObjectURL(url);
+};
+
+// ---- video source ----
+$('videoFile').onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  lecture.src = URL.createObjectURL(f); lecture.play();
+};
+$('loadSample').onclick = () => {
+  lecture.src = "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4";
+  lecture.play().catch(()=>{});
+};
+</script>
+</body>
+</html>
