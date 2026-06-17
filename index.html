@@ -50,6 +50,11 @@
   .log .i { color:var(--bad); }
   .log .a { color:var(--ok); }
   .toggle { display:flex; gap:6px; align-items:center; font-size:12px; color:var(--mut); }
+  .wstate { font-size:15px; font-weight:700; padding:6px 12px; border-radius:8px; }
+  .wstate.wengaged { background:rgba(54,211,153,.15); color:var(--ok); }
+  .wstate.wdrift { background:rgba(251,189,35,.15); color:var(--warn); }
+  .wstate.wdiseng { background:rgba(248,114,114,.15); color:var(--bad); }
+  .wstate.wunknown { background:rgba(154,163,178,.15); color:var(--mut); }
   footer { padding:10px 20px; color:var(--mut); font-size:11px; border-top:1px solid var(--line); }
   /* screen-map */
   canvas#screenMap { width:100%; height:120px; background:#11141a; border:1px solid var(--line); border-radius:8px; margin-top:6px; }
@@ -112,6 +117,17 @@
       <div class="metric"><div class="k">FPS (detector)</div><div class="v" id="mFps">—</div></div>
     </div>
 
+    <h2 style="margin-top:14px">WEDAR — attention regulation</h2>
+    <div class="row">
+      <span class="wstate wunknown" id="wedarState">—</span>
+      <span class="reasons" id="wedarReadout" style="margin:0">reg-density — · gaze-on — · enable + calibrate</span>
+    </div>
+    <div class="row">
+      <label class="toggle"><input type="checkbox" id="wedarEnable" checked> Enable WEDAR layer</label>
+      <label class="toggle"><input type="checkbox" id="wedarDebug"> Debug overlay (D)</label>
+      <label class="toggle"><input type="checkbox" id="wedarProbe"> Re-engagement probe</label>
+    </div>
+
     <div class="sparkWrap">
       <h2 style="margin-bottom:6px">Attention timeline</h2>
       <canvas id="spark" width="600" height="46"></canvas>
@@ -128,7 +144,9 @@
     </div>
 
     <div class="row">
-      <button class="sec" id="exportBtn" disabled>Export CSV log</button>
+      <button class="sec" id="exportBtn" disabled>Export gaze CSV</button>
+      <button class="sec" id="exportWedarBtn" disabled>Export WEDAR CSV</button>
+      <button class="sec" id="exportWedarJsonBtn" disabled>Export WEDAR JSON</button>
     </div>
     <div class="log" id="log"></div>
   </section>
@@ -145,7 +163,9 @@
 </div>
 
 <script type="module">
-import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+import { FaceLandmarker, HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+import { createWedar } from "./wedar/wedar.js";
+import { wedarConfig } from "./wedar/wedarConfig.js";
 
 // ---- elements ----
 const $ = id => document.getElementById(id);
@@ -173,6 +193,30 @@ let tabHidden = false;
 let gazeModel = { bx:null, by:null, set:false }; // coefficient vectors
 let gazeEMA = { x:0.5, y:0.5 };                  // smoothed predicted screen point
 let collecting = false, collectBuf = [];         // active sample collection during calibration
+
+// ---- WEDAR layer ----
+let wedar = null;
+const WSTATE = {
+  engaged:   { cls:'wengaged', txt:'ENGAGED' },
+  drifting_but_regulating: { cls:'wdrift', txt:'DRIFTING (regulating)' },
+  disengaged:{ cls:'wdiseng', txt:'DISENGAGED' },
+  unknown:   { cls:'wunknown', txt:'UNKNOWN' },
+};
+function onWedarEmit(ev) {
+  if (ev.kind === 'baseline') {
+    log('WEDAR baseline captured — adaptive thresholds active', 'a');
+    return;
+  }
+  if (ev.kind !== 'state') return;
+  const s = WSTATE[ev.committedState] || WSTATE.unknown;
+  const badge = $('wedarState');
+  badge.className = 'wstate ' + s.cls;
+  badge.textContent = s.txt;
+  const rd = ev.regulationDensity, gz = ev.gazeOnScreen;
+  $('wedarReadout').innerHTML = ev.committedState === 'unknown'
+    ? 'reg-density — · gaze-on — · <b>no verdict</b> (face/quality)'
+    : `reg-density <b>${(rd??0).toFixed(2)}</b> · gaze-on <b>${(gz??0).toFixed(2)}</b> · raw ${ev.rawState} · ${(ev.dwellMs/1000).toFixed(0)}s`;
+}
 
 document.addEventListener('visibilitychange', () => { tabHidden = document.hidden; });
 
@@ -233,7 +277,30 @@ async function initLandmarker() {
     runningMode: "VIDEO",
     numFaces: 1,
     outputFaceBlendshapes: true,
+    outputFacialTransformationMatrixes: true, // head pose for WEDAR
   });
+}
+
+// ---- hand model (WEDAR self-touch; lazy, optional, degradable) ----
+let handLandmarker = null;
+async function initHand() {
+  if (handLandmarker || !wedarConfig.HAND_ENABLED) return null;
+  try {
+    const files = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+    handLandmarker = await HandLandmarker.createFromOptions(files, {
+      baseOptions: {
+        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+        delegate: "GPU",
+      },
+      runningMode: "VIDEO", numHands: 2,
+    });
+    log('hand model loaded (self-touch detection on)', 'a');
+  } catch (e) {
+    handLandmarker = null;
+    log('hand model unavailable — running on 5 detectors', 'i');
+  }
+  return handLandmarker;
 }
 
 // ---- webcam ----
@@ -328,6 +395,7 @@ function loop() {
     const d = decide(res);
     drawOverlay(res);
     applyScoring(d);
+    if (wedar) wedar.onFrame(res, now, { gazeAttentive: d.ok });
   }
   // fps
   fps = 0.9 * fps + 0.1 * (1000 / (now - lastTs)); lastTs = now;
@@ -473,6 +541,22 @@ $('startBtn').onclick = async () => {
     frameWindow = []; sparkHist = []; csvRows = [csvRows[0]]; curState = 'wait';
     gazeModel.set = false; gazeEMA = { x:0.5, y:0.5 };
     $('stopBtn').disabled = false; $('exportBtn').disabled = false; $('calibBtn').disabled = false;
+
+    // WEDAR layer
+    if ($('wedarEnable').checked) {
+      wedarConfig.DEBUG = $('wedarDebug').checked;
+      wedarConfig.PROBE_ENABLED = $('wedarProbe').checked;
+      wedar = createWedar({
+        config: wedarConfig, video: lecture, onEmit: onWedarEmit,
+        probeContainer: document.querySelector('.videoWrap'),
+        context: () => ({ sessionId: 'sess-' + session.startedAt, learnerId: 'local' }),
+      });
+      wedar.start();
+      initHand().then(hl => { if (hl && wedar) wedar.setHandLandmarker(hl); });
+      $('exportWedarBtn').disabled = false; $('exportWedarJsonBtn').disabled = false;
+      log('WEDAR layer on — calibrate gaze; baseline auto-captures after');
+    } else { wedar = null; }
+
     log('tracking started — run 9-point calibration to enable real eye tracking');
     loop();
   } catch (e) {
@@ -532,21 +616,38 @@ async function runCalibration() {
   const rms = Math.sqrt(se / (samples.length*2)) * 100;
   log(`gaze calibrated — ${samples.length}/9 points, residual ${rms.toFixed(1)}% of screen`, 'a');
   if (rms > 18) log('high residual — recalibrate, hold head still & ensure good lighting', 'i');
+
+  // WEDAR per-learner neutral baseline capture (spec §7) right after gaze calibration
+  if (wedar) {
+    log(`capturing WEDAR baseline — look at the screen normally for ${(wedarConfig.BASELINE_CAPTURE_MS/1000)|0}s`);
+    wedar.captureNeutral();
+  }
 }
 $('calibBtn').onclick = runCalibration;
 $('stopBtn').onclick = () => {
   running = false; cancelAnimationFrame(rafId);
   (cam.srcObject?.getTracks()||[]).forEach(t=>t.stop());
   alertBorder.classList.remove('on');
+  if (wedar) { wedar.stop(); wedar.overlay.destroy(); }
   $('startBtn').disabled=false; $('stopBtn').disabled=true; $('calibBtn').disabled=true;
   stateBadge.className='state wait'; stateBadge.textContent='Stopped';
   log('tracking stopped');
 };
-$('exportBtn').onclick = () => {
-  const csv = csvRows.map(r=>r.join(',')).join('\n');
-  const url = URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
-  const a=document.createElement('a'); a.href=url; a.download='attention-log.csv'; a.click();
+
+function downloadBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a=document.createElement('a'); a.href=url; a.download=name; a.click();
   URL.revokeObjectURL(url);
+}
+$('exportBtn').onclick = () =>
+  downloadBlob(new Blob([csvRows.map(r=>r.join(',')).join('\n')],{type:'text/csv'}), 'attention-gaze-log.csv');
+$('exportWedarBtn').onclick = () => { if (wedar) downloadBlob(wedar.logger.exportCSV(), 'wedar-log.csv'); };
+$('exportWedarJsonBtn').onclick = () => { if (wedar) downloadBlob(wedar.logger.exportJSON(), 'wedar-log.json'); };
+
+// live debug toggle
+$('wedarDebug').onchange = e => {
+  wedarConfig.DEBUG = e.target.checked;
+  if (wedar) { if (e.target.checked) wedar.overlay.mount(); else wedar.overlay.destroy(); }
 };
 
 // ---- video source ----
